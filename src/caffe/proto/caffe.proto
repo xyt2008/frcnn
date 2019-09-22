@@ -165,6 +165,8 @@ message SolverParameter {
   //      zero by the max_iter. return base_lr (1 - iter/max_iter) ^ (power)
   //    - sigmoid: the effective learning rate follows a sigmod decay
   //      return base_lr ( 1/(1 + exp(-gamma * (iter - stepsize))))
+  //    - cosine: SGDR decay without restarts
+  //    - triangular/triangular2: Cyclic Learning Rate
   //
   // where base_lr, max_iter, gamma, step, stepvalue and power are defined
   // in the solver parameter protocol buffer, and iter is the current iteration.
@@ -241,6 +243,18 @@ message SolverParameter {
 
   // Overlap compute and communication for data parallel training
   optional bool layer_wise_reduce = 41 [default = true];
+
+  // fyk add for warm up early steps
+  optional int32 warm_up_iters = 42 [default = 500];
+  // Start the warm up from SOLVER.BASE_LR * SOLVER.WARM_UP_FACTOR
+  optional float warm_up_factor = 43 [default = 0.33];
+  // WARM_UP_METHOD can be either 'constant', 'exp' or 'linear' (i.e., gradual)
+  optional string warm_up_method = 44 [default = "linear"];
+  // for 'exp' method
+  optional int32 warm_up_power = 45 [default = 4];
+  // for 'triangular/triangular2' meethod
+  optional int32 start_lr_policy = 46 [default = 0]; // steps before start use this policy
+  optional float max_lr = 47; // The maximum learning rate for CLR policies
 }
 
 // A message that stores the solver snapshots
@@ -429,6 +443,29 @@ message LayerParameter {
   optional MultiRBoxLossParameter multirbox_loss_param = 			216;
   optional AnnotatedDataParameter annotated_data_param = 			217;
   optional AnnotatedRDataParameter annotated_r_data_param = 			218;
+  // fyk add for SSD
+  optional DetectionOutputParameter detection_output_param = 219;
+
+  // fyk add for Deformable Conv
+  optional DeformablePSROIPoolingParameter deformable_psroi_pooling_param = 228;
+  optional DeformableConvolutionParameter deformable_convolution_param = 229;
+
+  // fyk for CTPN text detection
+  optional TransposeParameter transpose_param = 230;
+  optional ReverseParameter reverse_param = 231;
+  optional LstmParameter lstm_param = 232;
+
+  // fyk for R-FCN
+  optional PSROIPoolingParameter psroi_pooling_param = 240;
+  optional BoxAnnotatorOHEMParameter box_annotator_ohem_param = 241;
+  //SmoothL1LossOHEMParameter do modify on LossParameter 
+  optional PSROIAlignParameter psroi_align_param = 242;
+
+  // fyk modify for Cascade R-CNN support
+  optional FrcnnProposalTargetParameter proposal_target_param = 250;
+  optional BBoxRegParameter bbox_reg_param = 251;
+  // for more ease use
+  optional FrcnnProposalParameter proposal_param = 252;
 
 }
 
@@ -702,6 +739,37 @@ message MultiRBoxLossParameter {
   optional float prior_height = 25;
   optional bool regress_angle = 26;
   optional bool regress_size = 27;
+}
+// Message that store parameters used by DetectionOutputLayer
+message DetectionOutputParameter {
+  // Number of classes to be predicted. Required!
+  optional uint32 num_classes = 1;
+  // If true, bounding box are shared among different classes.
+  optional bool share_location = 2 [default = true];
+  // Background label id. If there is no background class,
+  // set it as -1.
+  optional int32 background_label_id = 3 [default = 0];
+  // Parameters used for non maximum suppression.
+  optional NonMaximumSuppressionParameter nms_param = 4;
+  // Parameters used for saving detection results.
+  optional SaveOutputParameter save_output_param = 5;
+  // Type of coding method for bbox.
+  optional PriorBoxParameter.CodeType code_type = 6 [default = CORNER];
+  // If true, variance is encoded in target; otherwise we need to adjust the
+  // predicted offset accordingly.
+  optional bool variance_encoded_in_target = 8 [default = false];
+  // Number of total bboxes to be kept per image after nms step.
+  // -1 means keeping all bboxes after nms step.
+  optional int32 keep_top_k = 7 [default = -1];
+  // Only consider detections whose confidences are larger than a threshold.
+  // If not provided, consider all boxes.
+  optional float confidence_threshold = 9;
+  // If true, visualize the detection results.
+  optional bool visualize = 10 [default = false];
+  // The threshold used to visualize the detection results.
+  optional float visualize_threshold = 11;
+  // If provided, save outputs to video file.
+  optional string save_file = 12;
 }
 message RDetectionOutputParameter {
   // Number of classes to be predicted. Required!
@@ -1237,6 +1305,9 @@ message LossParameter {
     BATCH_SIZE = 2;
     // Do not normalize the loss.
     NONE = 3;
+    // fyk: add for R-FCN SmoothL1LossOHEM
+    // Divide by pre-fixed normalizer
+    PRE_FIXED = 4;
   }
   // For historical reasons, the default normalization for
   // SigmoidCrossEntropyLoss is BATCH_SIZE and *not* VALID.
@@ -1245,6 +1316,9 @@ message LossParameter {
   // is not specified, then setting this to false will be equivalent to
   // normalization = BATCH_SIZE to be consistent with previous behavior.
   optional bool normalize = 2;
+  // fyk: add for R-FCN SmoothL1LossOHEM
+  //pre-fixed normalizer
+  optional float pre_fixed_normalizer = 4 [default = 1];
 }
 
 // Messages that store parameters used by individual layer types follow, in
@@ -1686,6 +1760,7 @@ message PoolingParameter {
     MAX = 0;
     AVE = 1;
     STOCHASTIC = 2;
+    RCM = 3; // fyk add
   }
   optional PoolMethod pool = 1 [default = MAX]; // The pooling method
   // Pad, kernel size, and stride are all given as a single value for equal
@@ -1708,6 +1783,7 @@ message PoolingParameter {
   // If global_pooling then it will pool over the size of the bottom by doing
   // kernel_h = bottom->height and kernel_w = bottom->width
   optional bool global_pooling = 12 [default = false];
+  optional bool ceil_mode = 13 [default = true]; // fyk add
 }
 
 message PowerParameter {
@@ -2202,3 +2278,124 @@ message PReLUParameter {
   // Whether or not slope parameters are shared across channels.
   optional bool channel_shared = 2 [default = false];
 }
+
+message DeformableConvolutionParameter {
+  optional uint32 num_output = 1; // The number of outputs for the layer
+  optional bool bias_term = 2 [default = true]; // whether to have bias terms
+
+  // Pad, kernel size, and stride are all given as a single value for equal
+  // dimensions in all spatial dimensions, or once per spatial dimension.
+  repeated uint32 pad = 3; // The padding size; defaults to 0
+  repeated uint32 kernel_size = 4; // The kernel size
+  repeated uint32 stride = 6; // The stride; defaults to 1
+  // Factor used to dilate the kernel, (implicitly) zero-filling the resulting
+  // holes. (Kernel dilation is sometimes referred to by its use in the
+  // algorithme à trous from Holschneider et al. 1987.)
+  repeated uint32 dilation = 18; // The dilation; defaults to 1
+
+  // For 2D convolution only, the *_h and *_w versions may also be used to
+  // specify both spatial dimensions.
+  optional uint32 pad_h = 9 [default = 0]; // The padding height (2D only)
+  optional uint32 pad_w = 10 [default = 0]; // The padding width (2D only)
+  optional uint32 kernel_h = 11; // The kernel height (2D only)
+  optional uint32 kernel_w = 12; // The kernel width (2D only)
+  optional uint32 stride_h = 13; // The stride height (2D only)
+  optional uint32 stride_w = 14; // The stride width (2D only)
+
+  optional uint32 group = 5 [default = 1]; // The group size for group conv
+  optional uint32 deformable_group = 19 [default = 4];
+
+  optional FillerParameter weight_filler = 7; // The filler for the weight
+  optional FillerParameter bias_filler = 8; // The filler for the bias
+  enum Engine {
+    DEFAULT = 0;
+    CAFFE = 1;
+    CUDNN = 2;
+  }
+  optional Engine engine = 15 [default = DEFAULT];
+
+  // The axis to interpret as "channels" when performing convolution.
+  // Preceding dimensions are treated as independent inputs;
+  // succeeding dimensions are treated as "spatial".
+  // With (N, C, H, W) inputs, and axis == 1 (the default), we perform
+  // N independent 2D convolutions, sliding C-channel (or (C/g)-channels, for
+  // groups g>1) filters across the spatial axes (H, W) of the input.
+  // With (N, C, D, H, W) inputs, and axis == 1, we perform
+  // N independent 3D convolutions, sliding (C/g)-channels
+  // filters across the spatial axes (D, H, W) of the input.
+  optional int32 axis = 16 [default = 1];
+
+  // Whether to force use of the general ND convolution, even if a specific
+  // implementation for blobs of the appropriate number of spatial dimensions
+  // is available. (Currently, there is only a 2D-specific convolution
+  // implementation; for input blobs with num_axes != 2, this option is
+  // ignored and the ND implementation will be used.)
+  optional bool force_nd_im2col = 17 [default = false];
+}
+
+message DeformablePSROIPoolingParameter {
+  required float spatial_scale = 1; 
+  required int32 output_dim = 2; // output channel number
+  required int32 group_size = 3; // number of groups to encode position-sensitive score maps
+  optional int32 pooled_size = 4; // fix pooled size
+  optional int32 part_size = 5 [default = 0]; // fix part size
+  optional int32 sample_per_part = 6 [default = 1];//fix samples per part
+  optional float trans_std = 7[default = 0.0]; //fix transition std
+  optional bool no_trans = 8 [default = false];//whether to disable trans parameter 
+}
+
+// for CTPN text detection
+message TransposeParameter {
+  // For example, if you want to transpose NxCxHxW into WxNxHxC,
+  // the parameter should be the following:
+  // transpose_param { dim: 3 dim: 0 dim: 2 dim: 1 }
+  // ie, if the i-th dim has value n, then the i-th axis of top is equal to the n-th axis of bottom.
+  repeated int32 dim=1;
+}
+message ReverseParameter {
+  optional int32 axis=1 [default=0];
+}
+// Message that stores parameters used by LstmLayer
+message LstmParameter {
+  optional uint32 num_output = 1; // The number of outputs for the layer
+  optional float clipping_threshold = 2 [default = 0.0];
+  optional FillerParameter weight_filler = 3; // The filler for weight
+  optional FillerParameter bias_filler = 4; // The filler for the bias
+  optional uint32 batch_size = 5 [default = 1];
+}
+// end for CTPN
+
+// for R-FCN
+message PSROIPoolingParameter {
+  required float spatial_scale = 1; 
+  required int32 output_dim = 2; // output channel number
+  required int32 group_size = 3; // number of groups to encode position-sensitive score maps
+}
+message PSROIAlignParameter {
+  required float spatial_scale = 1; 
+  required int32 output_dim = 2; // output channel number
+  required int32 group_size = 3; // number of groups to encode position-sensitive score maps
+  optional int32 sample_num = 4 [default = 2]; // 
+}
+message BoxAnnotatorOHEMParameter {
+  required uint32 roi_per_img = 1; // number of rois for training
+  optional int32 ignore_label = 2 [default = -1]; // ignore_label in scoring
+}
+// end for R-FCN
+
+message FrcnnProposalParameter {
+  optional uint32 feat_stride = 1 [default = 0]; // usally set 16
+}
+// modify for Cascade R-CNN
+message FrcnnProposalTargetParameter {
+  optional float gt_iou_thr = 1 [default = 0.95];
+  optional uint32 stage = 2 [default=0];
+}
+// Message that stores parameters used for bounding box regression
+message BBoxRegParameter {
+  repeated float bbox_mean = 1;
+  repeated float bbox_std = 2;
+  optional bool cls_aware = 3 [default = true];
+}
+// end for Cascade R-CNN
+

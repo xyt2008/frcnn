@@ -21,6 +21,7 @@
 //
 //#endif
 //fyk
+#include "caffe/SSD/util/im_transforms.hpp"
 #include "data_enhance/histgram/equalize_hist.hpp"
 #include "data_augment/data_utils.hpp"
 #include "data_enhance/haze_free/haze.h"
@@ -36,6 +37,8 @@
 #include "caffe/FRCNN/frcnn_roi_data_layer.hpp"
 #include "caffe/FRCNN/util/frcnn_utils.hpp"
 #include "caffe/FRCNN/util/frcnn_param.hpp"
+
+//#define DEBUG_OUTPUT
 
 // caffe.proto > LayerParameter > FrcnnRoiDataLayer
 //   'source' field specifies the window_file
@@ -160,7 +163,10 @@ void FrcnnRoiDataLayer<Dtype>::DataLayerSetUp(
   }
 
   LOG(INFO) << "Shuffling data";
-  const unsigned int prefetch_rng_seed = FrcnnParam::rng_seed;
+  // fyk: if we use multi GPU
+  // int solver_count = Caffe::solver_count();
+  // Caffe::solver_rank() is set different value of each device by parallel.cpp 
+  const unsigned int prefetch_rng_seed = FrcnnParam::rng_seed + Caffe::solver_rank();
   prefetch_rng_.reset(new Caffe::RNG(prefetch_rng_seed));
   lines_id_ = 0; // First Shuffle
   CHECK(prefetch_rng_);
@@ -195,8 +201,7 @@ template <typename Dtype>
 void FrcnnRoiDataLayer<Dtype>::CheckResetRois(vector<vector<float> > &rois, const string image_path, const float cols, const float rows, const float im_scale) {
   CHECK_GT(rois.size(),0);//if there is no rois, will cause the following layer error
   for (int i = 0; i < rois.size(); i++) {
-    bool ok = rois[i][DataPrepare::X1] > 0 && rois[i][DataPrepare::Y1] > 0 && 
-        rois[i][DataPrepare::X2] < cols && rois[i][DataPrepare::Y2] < rows;
+    bool ok = rois[i][DataPrepare::X1] >= 0 && rois[i][DataPrepare::Y1] >= 0 && rois[i][DataPrepare::X2] < cols && rois[i][DataPrepare::Y2] < rows;
     if (ok == false) {
       DLOG(INFO) << "Roi Data Check Failed : " << image_path << " [" << i << "]";
       DLOG(INFO) << " row : " << rows << ",  col : " << cols << ", im_scale : " << im_scale << " | " << rois[i][DataPrepare::X1] << ", " << rois[i][DataPrepare::Y1] << ", " << rois[i][DataPrepare::X2] << ", " << rois[i][DataPrepare::Y2];
@@ -243,7 +248,8 @@ void FrcnnRoiDataLayer<Dtype>::load_batch(Batch<Dtype> *batch) {
   CHECK(lines_id_ < lines_.size() && lines_id_ >= 0) << "select error line id : " << lines_id_;
   int index = lines_[lines_id_];
   bool do_mirror = mirror && PrefetchRand() % 2 && this->phase_ == TRAIN;
-  bool do_augment = FrcnnParam::data_jitter >= 0 && PrefetchRand() % 2 && this->phase_ == TRAIN;
+  //bool do_augment = FrcnnParam::data_jitter >= 0 && PrefetchRand() % 2 && this->phase_ == TRAIN;
+  bool do_augment = FrcnnParam::data_jitter >= 0 && this->phase_ == TRAIN;
   float max_short = scales[PrefetchRand() % scales.size()];
 
   read_time += timer.MicroSeconds();
@@ -263,10 +269,7 @@ void FrcnnRoiDataLayer<Dtype>::load_batch(Batch<Dtype> *batch) {
   }
   cv::Mat src;
   cv_img.convertTo(src, CV_32FC3);
-  // leave this to data augment,or the code is hard to orgnize
-  //if (do_mirror) {
-  //  cv::flip(src, src, 1); // Flip
-  //}
+
   CHECK(src.isContinuous()) << "Warning : cv::Mat src is not Continuous !";
   CHECK_EQ(src.depth(), CV_32F) << "Image data type must be float 32 type";
   CHECK_EQ(src.channels(), 3) << "Image data type must be 3 channels";
@@ -275,26 +278,60 @@ void FrcnnRoiDataLayer<Dtype>::load_batch(Batch<Dtype> *batch) {
   timer.Start();
   vector<vector<float> > rois = roi_database_[index];
   // std::cout << image_database_[index] << std::endl;    
+  // horizontal flip
+  if (do_mirror) {
+    cv::flip(src, src, 1); // Flip
+    FlipRois(rois, cv_img.cols);
+  }
+  // other augmentation method
   if (do_augment) {
-    cv::Mat mat_aug = data_augment(src, rois, do_mirror, FrcnnParam::data_jitter, FrcnnParam::data_hue, FrcnnParam::data_saturation, FrcnnParam::data_exposure);
+    cv::Mat mat_aug = src.clone();
+    std::vector<std::vector<float> > aug_rois = rois;
+    // yolo style
+    //cv::Mat mat_aug = data_augment(mat_aug, aug_rois, do_mirror, FrcnnParam::data_jitter, FrcnnParam::data_rand_scale, FrcnnParam::data_rand_rotate, FrcnnParam::data_hue, FrcnnParam::data_saturation, FrcnnParam::data_exposure);
+    float prob;
+    int clockwise_degree = 0;
+    if (FrcnnParam::data_rand_rotate) {
+      caffe_rng_uniform(1, 0.f, 1.f, &prob);
+      if(prob > 0.75) clockwise_degree = 90;
+      else if(prob > 0.5) clockwise_degree = 180;
+      else if(prob > 0.25) clockwise_degree = 270;
+    }
+    if (clockwise_degree > 0) {
+      aug_rois = rotate_rois(src, rois, clockwise_degree, mat_aug);
+    }
+    if (FrcnnParam::data_jitter > 0) {
+      aug_rois = shift_image(mat_aug, aug_rois, FrcnnParam::data_jitter, mat_aug);
+    }
+    // distort
+    caffe_rng_uniform(1, 0.f, 1.f, &prob);
+    // Do random saturation & exposure distortion.
+    RandomSaturation(mat_aug, &mat_aug, prob, 1 / FrcnnParam::data_saturation, FrcnnParam::data_saturation);
+    RandomExposure(mat_aug, &mat_aug, prob, 1 / FrcnnParam::data_exposure, FrcnnParam::data_exposure);
+
+    // Do random hue distortion.
+    float hue_delta = 256 * FrcnnParam::data_hue;
+    RandomHue(mat_aug, &mat_aug, prob, hue_delta);
+    // other: RandomBrightness RandomContrast RandomOrderChannels
+
     // remove predicted boxes with either height or width < threshold, same as proposal layer
     vector<vector<float> > rois_aug;
-    for (int i = 0; i < rois.size(); i++) {
-        if ( (rois[i][DataPrepare::X2] - rois[i][DataPrepare::X1]) > FrcnnParam::rpn_min_size && (rois[i][DataPrepare::Y2] - rois[i][DataPrepare::Y1]) > FrcnnParam::rpn_min_size ) 
-            rois_aug.push_back(rois[i]);
+    for (int i = 0; i < aug_rois.size(); i++) {
+        if ( (aug_rois[i][DataPrepare::X2] - aug_rois[i][DataPrepare::X1]) > FrcnnParam::rpn_min_size && (aug_rois[i][DataPrepare::Y2] - aug_rois[i][DataPrepare::Y1]) > FrcnnParam::rpn_min_size ) 
+            rois_aug.push_back(aug_rois[i]);
     }
-    //std::cout << "src: " << src.rows << ' ' << src.cols << ' ' << mat_aug.rows << ' ' << mat_aug.cols << std::endl;
     // doing jitter may exclude the rois, and Faster R-CNN cannot handle the 0-roi data currently
     if (rois_aug.size() > 0) {
+      //Mat tmp=mat_aug.clone();
       //for(int i=0;i<rois_aug.size();i++){
       //    std::cout << rois_aug[i][0] << ' ' << rois_aug[i][1] << ' ' << rois_aug[i][2] << ' ' << rois_aug[i][3] << ' ' << rois_aug[i][4] << std::endl;
-      //    cvDrawDottedRect(mat_aug, cv::Point(rois[i][1], rois[i][2]), cv::Point(rois[i][3], rois[i][4]), cv::Scalar(0, 0, 200), 6, 1);
+      //    cvDrawDottedRect(tmp, cv::Point(rois_aug[i][1], rois_aug[i][2]), cv::Point(rois_aug[i][3], rois_aug[i][4]), cv::Scalar(0, 0, 200), 6, 1);
       //}
       //std::string im_name = std::to_string(index) + ".jpg";
-      //cv::imwrite(im_name, mat_aug);
+      //cv::imwrite(im_name, tmp);
+      cv_img = mat_aug;// used by CheckResetRois
       src = mat_aug;
-    } else {
-      rois = roi_database_[index]; // recover the original rois
+      rois = rois_aug;
     }
   }
   //fyk: do haze free,NOTICE that data enhancement should only be done one, current prioty is haze-free > retinex > hist_equalize
@@ -382,11 +419,6 @@ void FrcnnRoiDataLayer<Dtype>::load_batch(Batch<Dtype> *batch) {
   top_label[3] = 0;
   top_label[4] = 0;
 
-  // Flip
-  //if (do_mirror) {
-  //  FlipRois(rois, cv_img.cols);
-  //}
-
   //CHECK_EQ(rois.size(), channels-1);
   for (int i = 1; i < channels; i++) {
     CHECK_EQ(rois[i-1].size(), DataPrepare::NUM);
@@ -412,7 +444,19 @@ void FrcnnRoiDataLayer<Dtype>::load_batch(Batch<Dtype> *batch) {
       top_label[5 * i + 1] = 0;
       DLOG(INFO) << mirror << " row : " << src.rows << ",  col : " << src.cols << ", im_scale : " << im_scale << " | " << rois[i-1][DataPrepare::Y2] << " , " << top_label[5 * i + 3];
     }
+
+#ifdef DEBUG_OUTPUT
+    if (do_augment) {
+          cvDrawDottedRect(src, cv::Point(rois[i-1][DataPrepare::X1] * im_scale, rois[i-1][DataPrepare::Y1] * im_scale), cv::Point(rois[i-1][DataPrepare::X2] * im_scale, rois[i-1][DataPrepare::Y2] * im_scale), cv::Scalar(0, 0, 200), 6, 1);
+    }
+#endif
   }
+#ifdef DEBUG_OUTPUT
+  if (do_augment) {
+      std::string im_name = std::to_string(index) + ".jpg";
+      cv::imwrite(im_name, src);
+  }
+#endif
 
   trans_time += timer.MicroSeconds();
 

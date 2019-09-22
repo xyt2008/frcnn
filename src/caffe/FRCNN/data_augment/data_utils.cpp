@@ -616,7 +616,7 @@ void set_rand_seed(int seed)
 	else
 		srand(seed);
 }
-image data_augment(image orig, box_label *boxes, int num_boxes, int w, int h, int flip, float jitter, float hue, float saturation, float exposure) {
+image data_augment(image orig, box_label *boxes, int num_boxes, int w, int h, int flip, float jitter, float rand_scale, float hue, float saturation, float exposure) {
 
 	if (w <= 0 || h <= 0)
 	{
@@ -631,7 +631,7 @@ image data_augment(image orig, box_label *boxes, int num_boxes, int w, int h, in
 	float dh = jitter * orig.h;
 
 	float new_ar = (orig.w + rand_uniform(-dw, dw)) / (orig.h + rand_uniform(-dh, dh));
-	float scale = rand_uniform(.5, 2);// .25 maybe is too small
+	float scale = rand_uniform(1.0/rand_scale, rand_scale);// (.5, 2)
 	//float scale = rand_uniform(.8, 1.2);// .25 maybe is too small
 
 	float nw, nh;
@@ -662,13 +662,27 @@ image data_augment(image orig, box_label *boxes, int num_boxes, int w, int h, in
 }
 // return CV_32FC3 image
 cv::Mat data_augment(cv::Mat &src, std::vector<std::vector<float> > &rois,
-	int flip, float jitter, float hue, float saturation, float exposure) {
+	int flip, float jitter, float scale, bool random_rotate, float hue, float saturation, float exposure) {
 	int num_boxes = rois.size();
 	box_label *boxes = (box_label*)calloc(num_boxes, sizeof(box_label));
 	convert_box(rois, boxes, src.cols, src.rows);
 	image orig = cvmat_to_image(src);
-	image result = data_augment(orig, boxes, num_boxes, 0, 0, flip, jitter, hue, saturation, exposure);
-//	rois = convert_box(boxes, num_boxes, src.cols, src.rows);
+
+        if (random_rotate) {
+            float rad = M_PI;
+            float rd = rand_uniform(0, 1);
+            if(rd > 0.66) rad = M_PI_2;//anti-clock rad
+            else if(rd > 0.33) rad = 0;
+            if (rad > 0) {
+                box_label *_boxes = (box_label*)calloc(num_boxes, sizeof(box_label));
+                image rotate_img = rotate_augment(rad, orig, boxes, _boxes, num_boxes);
+                free_image(orig);
+                free(boxes);
+                orig = rotate_img;
+                boxes = _boxes;
+            }
+        }
+	image result = data_augment(orig, boxes, num_boxes, 0, 0, flip, jitter, scale, hue, saturation, exposure);
 	rois = convert_box(boxes, num_boxes, result.w, result.h);
 	free(boxes);
 	free_image(orig);
@@ -681,6 +695,7 @@ void rotate180(box_label *label_in, box_label *label_out, int num_boxes)
 	for (int i = 0; i < num_boxes; i++)
 	{
 		box_label b = label_in[i];
+		label_out[i].id = label_in[i].id;
 		label_out[i].x = 1. - b.x;
 		label_out[i].y = 1. - b.y;
 		label_out[i].w = b.w;
@@ -715,13 +730,13 @@ image rotate_augment(float rad, image im_in, box_label *label_in, box_label *lab
 		float cx = im_in.w / 2.;//when calc rect after rotate,cannot use relative value.
 		float cy = im_in.h / 2.;
 		cv::Point2f pts[4];
-		for (int i = 0; i < 4; i++)
+		for (int j = 0; j < 4; j++)
 		{
-			float rx = (i < 2 ? b.left : b.right)*im_in.w;
-			float ry = (i % 3 == 0 ? b.top : b.bottom)*im_in.h;
+			float rx = (j < 2 ? b.left : b.right)*im_in.w;
+			float ry = (j % 3 == 0 ? b.top : b.bottom)*im_in.h;
 			float x = -(ry - cy) * a_sin + (rx - cx) * a_cos + cx;
 			float y = (ry - cy) * a_cos + (rx - cx) * a_sin + cy;
-			pts[i] = cv::Point2f(x / im_in.w, y / im_in.h);
+			pts[j] = cv::Point2f(x / im_in.w, y / im_in.h);
 		}
 		float min_x = std::min(pts[0].x, pts[1].x);
 		float max_x = std::max(pts[0].x, pts[1].x);

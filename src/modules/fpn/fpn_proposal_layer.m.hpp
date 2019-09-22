@@ -29,8 +29,11 @@ template <typename Dtype>
 class FPNProposalLayer : public Layer<Dtype> {
  public:
   explicit FPNProposalLayer(const LayerParameter& param)
-      //: Layer<Dtype>(param) {} //fyk: fix problem of runtest
+#ifndef CPU_ONLY //fyk: fix problem of runtest
       : Layer<Dtype>(param), anchors_(nullptr), transform_bbox_(nullptr), mask_(nullptr), selected_flags_(nullptr), gpu_keep_indices_(nullptr) {}
+#else
+      : Layer<Dtype>(param) {}
+#endif
   virtual void LayerSetUp(const vector<Blob<Dtype>*>& bottom,
       const vector<Blob<Dtype>*>& top);
   virtual void Reshape(const vector<Blob<Dtype>*>& bottom,
@@ -41,7 +44,7 @@ class FPNProposalLayer : public Layer<Dtype> {
   virtual inline int MinBottomBlobs() const { return 11; }// include level pyramid.
   virtual inline int MaxBottomBlobs() const { return 11; }
   virtual inline int MinTopBlobs() const { return 1; }
-  virtual inline int MaxTopBlobs() const { return 4; }
+  virtual inline int MaxTopBlobs() const { return 6; }
 
 #ifndef CPU_ONLY
   virtual ~FPNProposalLayer() {
@@ -81,6 +84,8 @@ class FPNProposalLayer : public Layer<Dtype> {
   int *gpu_keep_indices_;
 #endif
   std::vector<int> _feat_strides;
+  std::vector<int> _anchor_scales;
+  std::vector<float> _anchor_ratios;
 };
 
 }  // namespace frcnn

@@ -1,7 +1,7 @@
 PROJECT := caffe
 API := api
 YAML := yaml-cpp-0.5.3
-MODULE_LIBRARY_NAME := frcnn
+MODULE_LIBRARY_NAME := modules
 MODULE_SRC ?= src/modules
 
 CONFIG_FILE := Makefile.config
@@ -201,7 +201,7 @@ ifeq ($(USE_OPENCV), 1)
 	LIBRARIES += opencv_core opencv_highgui opencv_imgproc
 
 	ifeq ($(OPENCV_VERSION), 3)
-		LIBRARIES += opencv_imgcodecs
+		LIBRARIES += opencv_imgcodecs opencv_videoio
 	endif
 
 endif
@@ -268,7 +268,8 @@ ifeq ($(LINUX), 1)
 	endif
 	# boost::thread is reasonably called boost_thread (compare OS X)
 	# We will also explicitly add stdc++ to the link target.
-	LIBRARIES += boost_thread stdc++
+	# LIBRARIES += boost_thread stdc++
+	LIBRARIES += boost_thread stdc++ boost_regex # boost_regex for SSD
 	VERSIONFLAGS += -Wl,-soname,$(DYNAMIC_VERSIONED_NAME_SHORT) -Wl,-rpath,$(ORIGIN)/../lib
 endif
 
@@ -381,8 +382,8 @@ BIN_LDFLAGS += -Wl,-rpath,$(shell pwd)/$(LIB_BUILD_DIR) -L$(LIB_BUILD_DIR) -l$(Y
 ## pybind interface
 # name of .so as well as python module name
 FRCNN_PYBIND := frcnn
-PY$(FRCNN_PYBIND)_SRC := python/frcnn/$(FRCNN_PYBIND).cpp
-# PY$(FRCNN_PYBIND)_HXX :=
+PY$(FRCNN_PYBIND)_SRCS := python/frcnn/$(FRCNN_PYBIND).cpp
+PY$(FRCNN_PYBIND)_OBJS := $(addprefix $(BUILD_DIR)/, ${PY$(FRCNN_PYBIND)_SRCS:.cpp=.o})
 PY_FRCNN_LIB := $(DISTRIBUTE_DIR)/python/$(FRCNN_PYBIND).so
 PY_HXX_FLAGS = -I$(includedir)
 ifeq ($(USE_ANACONDA),1)
@@ -409,9 +410,8 @@ LAYER_MODULE_PREFIX ?= "lib"
 COMMON_FLAGS += -DLAYER_MODULE_PREFIX="\"$(LAYER_MODULE_PREFIX)\""
 LAYER_MODULE_SUFFIX ?= ".so"
 COMMON_FLAGS += -DLAYER_MODULE_SUFFIX="\"$(LAYER_MODULE_SUFFIX)\""
-#DEFAULT_LAYER_PATH ?= $(DISTRIBUTE_DIR)/lib/caffe/layers
-#DEFAULT_LAYER_PATH ?= $(LIB_BUILD_DIR)/module_layers
-DEFAULT_LAYER_PATH ?= $(DISTRIBUTE_DIR)/modules
+#DEFAULT_LAYER_PATH ?= $(DISTRIBUTE_DIR)/modules
+DEFAULT_LAYER_PATH ?= $(LIB_BUILD_DIR)
 COMMON_FLAGS += -DDEFAULT_LAYER_PATH="\"$(DEFAULT_LAYER_PATH)\""
 MODULE_DYNAMIC_NAME := $(DEFAULT_LAYER_PATH)/lib$(MODULE_LIBRARY_NAME).so
 #LIBRARIES += dl
@@ -420,7 +420,10 @@ MODULE_CXX_SRCS := $(shell find $(MODULE_SRC) ! -name "test_*.cpp" -name "*.cpp"
 MODULE_CU_SRCS := $(shell find $(MODULE_SRC) ! -name "test_*.cu" -name "*.cu")
 MODULE_CXX_OBJS := $(addprefix $(BUILD_DIR)/, ${MODULE_CXX_SRCS:.cpp=.o})
 MODULE_CU_OBJS := $(addprefix $(BUILD_DIR)/cuda/, ${MODULE_CU_SRCS:.cu=.o})
-MODULE_OBJS := $(MODULE_CXX_OBJS) $(MODULE_CU_OBJS)
+MODULE_OBJS := $(MODULE_CXX_OBJS)
+ifneq ($(CPU_ONLY), 1)
+    MODULE_OBJS += $(MODULE_CU_OBJS)
+endif
 # fyk end
 
 # BLAS configuration (default = ATLAS)
@@ -628,24 +631,25 @@ $(ALL_BUILD_DIRS): | $(BUILD_DIR_LINK)
 	@ mkdir -p $@
 
 # fyk add
-$(DEFAULT_LAYER_PATH):
-	@ mkdir -p $(DEFAULT_LAYER_PATH)
+#$(DEFAULT_LAYER_PATH):
+#	@ mkdir -p $(DEFAULT_LAYER_PATH)
 $(YAML_DYNLIB): $(YAML_OBJS)
 	@ echo LD -o $(YAML_DYNLIB)
 	$(Q)$(CXX) -shared -o $(YAML_DYNLIB) $(YAML_OBJS) $(LINKFLAGS)
 
+# for module .so to be load in pycaffe, we have to include the dependency
 module: $(MODULE_DYNAMIC_NAME)
-$(MODULE_DYNAMIC_NAME): $(MODULE_OBJS) | $(DEFAULT_LAYER_PATH) $(YAML_DYNLIB)
+$(MODULE_DYNAMIC_NAME): $(MODULE_OBJS) | $(DEFAULT_LAYER_PATH) $(YAML_DYNLIB) $(DYNAMIC_NAME)
 	@ echo LD -o $(MODULE_DYNAMIC_NAME)
-	$(Q)$(CXX) -shared -o $(MODULE_DYNAMIC_NAME) $(MODULE_OBJS) $(LINKFLAGS) $(BIN_LDFLAGS)
+	$(Q)$(CXX) -shared -o $(MODULE_DYNAMIC_NAME) $(MODULE_OBJS) $(LINKFLAGS) -l$(LIBRARY_NAME) $(LDFLAGS) $(BIN_LDFLAGS)
 
 pyfrcnn: $(PY_FRCNN_LIB)
-$(PY_FRCNN_LIB): $(PY$(FRCNN_PYBIND)_SRC) $(PY$(FRCNN_PYBIND)_HXX) | $(DYNAMIC_NAME)
+$(PY_FRCNN_LIB): $(PY$(FRCNN_PYBIND)_OBJS) | $(DYNAMIC_NAME) $(MODULE_DYNAMIC_NAME)
 	@ echo CXX/LD -o $@ $<
 	@ mkdir -p $(DISTRIBUTE_DIR)/python
-	$(Q)$(CXX) -shared -o $@ $(PY$(FRCNN_PYBIND)_SRC) \
-            $(ANACONDA_PY_LDFLAGS) $(LINKFLAGS) $(PY_HXX_FLAGS) \
-            -Wl,-rpath,$(ORIGIN)/../../build/lib -L$(LIB_BUILD_DIR) -l$(LIBRARY_NAME)
+	$(Q)$(CXX) -shared -o $@ $(PY$(FRCNN_PYBIND)_OBJS) \
+            $(LINKFLAGS) $(PY_HXX_FLAGS) $(ANACONDA_PY_LDFLAGS) -L$(LIB_BUILD_DIR) -l$(LIBRARY_NAME) \
+            -Wl,-rpath,$(ORIGIN)/../../build/lib
 
 allso: $(DYNAMIC_NAME) $(YAML_DYNLIB) $(MODULE_DYNAMIC_NAME)
 # fyk end

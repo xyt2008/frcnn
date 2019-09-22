@@ -1,6 +1,11 @@
 #include "api/FRCNN/frcnn_api.hpp"
+#include "caffe/FRCNN/util/frcnn_gpu_nms.hpp"
+#include "api/util/blowfish.hpp"
+#include <cstdio>
 
 namespace FRCNN_API{
+
+using namespace caffe::Frcnn;
 
 void Detector::preprocess(const cv::Mat &img_in, const int blob_idx) {
   const vector<Blob<float> *> &input_blobs = net_->input_blobs();
@@ -28,25 +33,40 @@ void Detector::preprocess(const vector<float> &data, const int blob_idx) {
 }
 
 void Detector::Set_Model(std::string &proto_file, std::string &model_file) {
-  this->roi_pool_layer = - 1;
-  net_.reset(new Net<float>(proto_file, caffe::TEST));
-  net_->CopyTrainedLayersFrom(model_file);
+  // decypt the model, the key is fixed here. maybe you can place it somewhere else.
+  if (FrcnnParam::test_decrypt_model) {
+    // the key is love
+    const char key[]  = {108, 111, 118, 101};
+    vector<char> v_key(key, key + sizeof(key)/sizeof(char));
+    Blowfish bf(v_key);
+    std::string tmp_file = bf.getRandomTmpFile();
+    bf.Decrypt(proto_file.c_str(), tmp_file.c_str());
+    net_.reset(new Net<float>(tmp_file, caffe::TEST));
+    bf.Decrypt(model_file.c_str(), tmp_file.c_str());
+    net_->CopyTrainedLayersFrom(tmp_file);
+    // rm the tmp file
+    remove(tmp_file.c_str());
+  } else {
+    net_.reset(new Net<float>(proto_file, caffe::TEST));
+    net_->CopyTrainedLayersFrom(model_file);
+  }
   mean_[0] = FrcnnParam::pixel_means[0];
   mean_[1] = FrcnnParam::pixel_means[1];
   mean_[2] = FrcnnParam::pixel_means[2];
   const vector<std::string>& layer_names = this->net_->layer_names();
   const std::string roi_name = "roi_pool";
+  this->roi_pool_layer = - 1;
   for (size_t i = 0; i < layer_names.size(); i++) {
     if (roi_name.size() > layer_names[i].size()) continue;
     if (roi_name == layer_names[i].substr(0, roi_name.size())) {
       //CHECK_EQ(this->roi_pool_layer, -1) << "Previous roi layer : " << this->roi_pool_layer << " : " << layer_names[this->roi_pool_layer];
-      // fyk: this var of roi_pool_layer is only used by predict_iterate,when I use 2 context roi_pool_layer, I don't use predict_iterate
       this->roi_pool_layer = i;
     }
   }
-  CHECK(this->roi_pool_layer >= 0 && this->roi_pool_layer < layer_names.size());
+  // fyk: this var of roi_pool_layer is only used by predict_iterate,when I use 2 context roi_pool_layer or use R-FCN, I don't use predict_iterate
+  //CHECK(this->roi_pool_layer >= 0 && this->roi_pool_layer < layer_names.size());
   DLOG(INFO) << "SET MODEL DONE, ROI POOLING LAYER : " << layer_names[this->roi_pool_layer];
-  caffe::Frcnn::FrcnnParam::print_param();
+  //caffe::Frcnn::FrcnnParam::print_param();
 }
 
 vector<boost::shared_ptr<Blob<float> > > Detector::predict(const vector<std::string> blob_names) {
@@ -72,9 +92,11 @@ void Detector::predict(const cv::Mat &img_in, std::vector<caffe::Frcnn::BBox<flo
 
 void Detector::predict_original(const cv::Mat &img_in, std::vector<caffe::Frcnn::BBox<float> > &results) {
 
-  CHECK(FrcnnParam::test_scales.size() == 1) << "Only single-image batch implemented";
+  //CHECK(FrcnnParam::test_scales.size() == 1) << "Only single-image batch implemented";
 
-  float scale_factor = caffe::Frcnn::get_scale_factor(img_in.cols, img_in.rows, FrcnnParam::test_scales[0], FrcnnParam::test_max_size);
+std::vector<std::vector<caffe::Frcnn::BBox<float> > > bboxes_by_class(caffe::Frcnn::FrcnnParam::n_classes);
+for (int test_scale_idx = 0; test_scale_idx < FrcnnParam::test_scales.size(); test_scale_idx++) {
+  float scale_factor = caffe::Frcnn::get_scale_factor(img_in.cols, img_in.rows, FrcnnParam::test_scales[test_scale_idx], FrcnnParam::test_max_size);
 
   cv::Mat img;
   const int height = img_in.rows;
@@ -89,7 +111,25 @@ void Detector::predict_original(const cv::Mat &img_in, std::vector<caffe::Frcnn:
       reinterpret_cast<float *>(img.data)[offset + 2] -= this->mean_[2]; // R
     }
   }
-  cv::resize(img, img, cv::Size(), scale_factor, scale_factor);
+  //cv::resize(img, img, cv::Size(), scale_factor, scale_factor);
+  //fyk: check decimation or zoom,use different method
+  if( scale_factor < 1 )
+    cv::resize(img, img, cv::Size(), scale_factor, scale_factor, cv::INTER_AREA);
+  else
+    cv::resize(img, img, cv::Size(), scale_factor, scale_factor);
+  if (FrcnnParam::im_size_align > 0) {
+    // pad to align im_size_align
+    int new_im_height = int(std::ceil(img.rows / float(FrcnnParam::im_size_align)) * FrcnnParam::im_size_align);
+    int new_im_width = int(std::ceil(img.cols / float(FrcnnParam::im_size_align)) * FrcnnParam::im_size_align);
+    cv::Mat padded_im = cv::Mat::zeros(cv::Size(new_im_width, new_im_height), CV_32FC3);
+    float *res_mat_data = (float *)img.data;
+    float *new_mat_data = (float *)padded_im.data;
+    for (int y = 0; y < img.rows; ++y)
+        for (int x = 0; x < img.cols; ++x)
+            for (int k = 0; k < 3; ++k)
+                new_mat_data[(y * new_im_width + x) * 3 + k] = res_mat_data[(y * img.cols + x) * 3 + k];
+    img = padded_im;
+  }
 
   std::vector<float> im_info(3);
   im_info[0] = img.rows;
@@ -120,7 +160,7 @@ void Detector::predict_original(const cv::Mat &img_in, std::vector<caffe::Frcnn:
   static float* means = FrcnnParam::bbox_normalize_targets ? FrcnnParam::bbox_normalize_means : zero_means;
   static float* stds  = FrcnnParam::bbox_normalize_targets ? FrcnnParam::bbox_normalize_stds : one_stds;
   for (int cls = 1; cls < cls_num; cls++) { 
-    vector<BBox<float> > bbox;
+    vector<BBox<float> >& bbox = bboxes_by_class[cls];
     for (int i = 0; i < box_num; i++) { 
       float score = cls_prob->cpu_data()[i * cls_num + cls];
       // fyk: speed up
@@ -148,22 +188,117 @@ void Detector::predict_original(const cv::Mat &img_in, std::vector<caffe::Frcnn:
       // LOG(ERROR) << "roi: " << roi.to_string();
       bbox.push_back(BBox<float>(box, score, cls));
     }
+  } //class
+}//scales
+  int cls_num = caffe::Frcnn::FrcnnParam::n_classes;
+  for (int cls = 1; cls < cls_num; cls++) { 
+    vector<BBox<float> >& bbox = bboxes_by_class[cls];
     if (0 == bbox.size()) continue;
-    sort(bbox.begin(), bbox.end());
-    vector<bool> select(bbox.size(), true);
+    vector<BBox<float> > bbox_backup = bbox;
+    vector<BBox<float> > bbox_NMS;
+    
     // Apply NMS
-    for (int i = 0; i < bbox.size(); i++)
-      if (select[i]) {
-        //if (bbox[i].confidence < FrcnnParam::test_score_thresh) break;
-        for (int j = i + 1; j < bbox.size(); j++) {
-          if (select[j]) {
-            if (get_iou(bbox[i], bbox[j]) > FrcnnParam::test_nms) {
-              select[j] = false;
+    // fyk: GPU nms
+#ifndef CPU_ONLY
+    if (caffe::Caffe::mode() == caffe::Caffe::GPU && FrcnnParam::test_use_gpu_nms) {
+      int n_boxes = bbox.size();
+      int box_dim = 5;
+      // sort score if use naive nms
+      if (FrcnnParam::test_soft_nms == 0) {
+        sort(bbox.begin(), bbox.end());
+        box_dim = 4;
+      }
+      std::vector<float> boxes_host(n_boxes * box_dim);
+      for (int i=0; i < n_boxes; i++) {
+        for (int k=0; k < box_dim; k++)
+          boxes_host[i * box_dim + k] = bbox[i][k];
+      }
+      int keep_out[n_boxes];//keeped index of boxes_host
+      int num_out;//how many boxes are keeped
+      // call gpu nms, currently only support naive nms
+      _nms(&keep_out[0], &num_out, &boxes_host[0], n_boxes, box_dim, FrcnnParam::test_nms);
+      //if (FrcnnParam::test_soft_nms == 0) { // naive nms
+      //  _nms(&keep_out[0], &num_out, &boxes_host[0], n_boxes, box_dim, FrcnnParam::test_nms);
+      //} else {
+      //  _soft_nms(&keep_out[0], &num_out, &boxes_host[0], n_boxes, box_dim, FrcnnParam::test_nms, FrcnnParam::test_soft_nms);
+      //}
+      for (int i=0; i < num_out; i++) {
+        bbox_NMS.push_back(bbox[keep_out[i]]);
+      }
+    } else { // cpu
+#endif
+      if (FrcnnParam::test_soft_nms == 0) { // naive nms
+        sort(bbox.begin(), bbox.end());
+        vector<bool> select(bbox.size(), true);
+        for (int i = 0; i < bbox.size(); i++)
+          if (select[i]) {
+            //if (bbox[i].confidence < FrcnnParam::test_score_thresh) break;
+            for (int j = i + 1; j < bbox.size(); j++) {
+              if (select[j]) {
+                if (get_iou(bbox[i], bbox[j]) > FrcnnParam::test_nms) {
+                  select[j] = false;
+                }
+              }
+            }
+            bbox_NMS.push_back(bbox[i]);
+          }
+      } else {
+        // soft-nms
+        float sigma = 0.5;
+        float score_thresh = 0.001;
+        int N = bbox.size();
+        for (int cur_box_idx = 0; cur_box_idx < N; cur_box_idx++) {
+          // find max score box
+          float maxscore = bbox[cur_box_idx].confidence;
+          int maxpos = cur_box_idx;
+          for (int i = cur_box_idx + 1; i < N; i++) {
+            if (maxscore < bbox[i].confidence) {
+              maxscore = bbox[i].confidence;
+              maxpos = i;
+            }
+          }
+          //swap
+          BBox<float> tt = bbox[cur_box_idx];
+          bbox[cur_box_idx] = bbox[maxpos];
+          bbox[maxpos] = tt;
+
+          for (int i = cur_box_idx + 1; i < N; i++) {
+            float iou = get_iou(bbox[i], bbox[cur_box_idx]);
+            float weight = 1;
+            if (1 == FrcnnParam::test_soft_nms) { // linear
+              if (iou > FrcnnParam::test_nms) weight = 1 - iou;
+            } else if (2 == FrcnnParam::test_soft_nms) { // gaussian
+              weight = exp(- (iou * iou) / sigma);
+            } else { // original NMS
+              if (iou > FrcnnParam::test_nms) weight = 0;
+            }
+            bbox[i].confidence *= weight;
+            if (bbox[i].confidence < score_thresh) {
+              // discard the box by swapping with last box
+              tt = bbox[i];
+              bbox[i] = bbox[N-1];
+              bbox[N-1] = tt;
+              N -= 1;
+              i -= 1;
             }
           }
         }
-        results.push_back(bbox[i]);
-      }
+        for (int i=0; i < N; i++) {
+          if (bbox[i].confidence >= FrcnnParam::test_score_thresh)
+            bbox_NMS.push_back(bbox[i]);
+        }
+      } //nms type switch
+#ifndef CPU_ONLY
+    } //cpu
+#endif
+    // box-voting
+    if (FrcnnParam::test_bbox_vote) {
+      // since soft nms will change score of bbox, we use backup
+      bbox_NMS = bbox_vote(bbox_NMS, bbox_backup);
+      //bbox_NMS = bbox_vote(bbox_NMS, bbox_NMS);
+    }
+
+    results.insert(results.end(), bbox_NMS.begin(), bbox_NMS.end());
   }
 
 }

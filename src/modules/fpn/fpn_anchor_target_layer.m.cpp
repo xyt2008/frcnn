@@ -35,6 +35,25 @@ void FPNAnchorTargetLayer<Dtype>::LayerSetUp(const vector<Blob<Dtype> *> &bottom
   for (std::size_t i=0;i<params["feat_strides"].size();i++) {
       _feat_strides.push_back(params["feat_strides"][i].as<int>());
   }
+  if (params["anchor_scales"]) {
+    for (std::size_t i=0;i<params["anchor_scales"].size();i++) {
+      this->anchor_scales.push_back(params["anchor_scales"][i].as<int>());
+    }
+  } else {
+    this->anchor_scales.push_back(8);
+    this->anchor_scales.push_back(16);
+    //this->anchor_scales.push_back(32);//maybe too much
+  }
+  if (params["anchor_ratios"]) {
+    for (std::size_t i=0;i<params["anchor_ratios"].size();i++) {
+      this->anchor_ratios.push_back(params["anchor_ratios"][i].as<float>());
+    }
+  } else {
+    this->anchor_ratios.push_back(0.5);
+    this->anchor_ratios.push_back(1);
+    this->anchor_ratios.push_back(2);
+  }
+  config_n_anchors_ = this->anchor_ratios.size() * this->anchor_scales.size();// anchors num of each pixel in each pyramid feature
 
   border_ = FrcnnParam::rpn_allowed_border;
 
@@ -54,12 +73,12 @@ void FPNAnchorTargetLayer<Dtype>::LayerSetUp(const vector<Blob<Dtype> *> &bottom
   //from C2 to C6
   //const int _feat_strides[] = {4, 8, 16, 32, 64};//use it as base anchor size
   //const int anchor_sizes = {32, 64, 128, 256, 512};//not used
-  const int scales[] = {8, 16};
-  const int n_scales = sizeof(scales) / sizeof(int);
-  this->anchor_scales = vector<int>(scales, scales + n_scales);
-  float arr[] = {0.5, 1, 2};
-  anchor_ratios = vector<float> (arr, arr+3);
-  config_n_anchors_ = 3 * n_scales;// anchors num of each pixel in each pyramid feature
+  //const int scales[] = {8, 16}; // for VOC
+  //const int scales[] = {8}; // for COCO
+  //const int n_scales = sizeof(scales) / sizeof(int);
+  //this->anchor_scales = vector<int>(scales, scales + n_scales);
+  //float arr[] = {0.5, 1, 2};
+  //anchor_ratios = vector<float> (arr, arr+3);
 
   // labels
   //top[0]->Reshape(1, 1, config_n_anchors_ * height, width);
@@ -122,9 +141,8 @@ void FPNAnchorTargetLayer<Dtype>::Forward_cpu(
 
  vector<int> inds_inside;
  vector<Point4f<Dtype> > anchors;
+ vector<int> fpn_idx;
  int feat_areas = 0; // sum of feature map areas
- int max_area = 0;
- vector<int> fpn_width(_feat_strides.size());
  vector<int> fpn_areas_accum(_feat_strides.size()); // accumulate of anchors num of leveled feature maps
 
  //for loop
@@ -133,13 +151,11 @@ void FPNAnchorTargetLayer<Dtype>::Forward_cpu(
   CHECK(num == 1) << "only single item batches are supported";
   const int height = bottom[fp_i]->height();
   const int width = bottom[fp_i]->width();
-  fpn_width[fp_i] = width;
   int area = height * width;
-  max_area = area > max_area ? area:max_area;
   fpn_areas_accum[fp_i] = feat_areas;
   feat_areas += area;
  }
- int max_anchors = max_area * config_n_anchors_;
+
  for(int fp_i = 0; fp_i<_feat_strides.size(); fp_i++) {
   
   // Generate anchors
@@ -168,8 +184,9 @@ void FPNAnchorTargetLayer<Dtype>::Forward_cpu(
         if (x1 >= bounds[0] && y1 >= bounds[1] && x2 < bounds[2] &&
             y2 < bounds[3]) {
           //inds_inside.push_back((h * width + w) * config_n_anchors_ + k);
-          inds_inside.push_back(fp_i * max_anchors + (h * width + w) * config_n_anchors_ + k);
+          inds_inside.push_back(fpn_areas_accum[fp_i] * config_n_anchors_ + (h * width + w) * config_n_anchors_ + k);
           anchors.push_back(Point4f<Dtype>(x1, y1, x2, y2));
+          fpn_idx.push_back(fp_i);
         }
       }
     }
@@ -190,7 +207,8 @@ void FPNAnchorTargetLayer<Dtype>::Forward_cpu(
   vector<Dtype> gt_max_overlaps(gt_boxes.size(), -1);
   vector<int> gt_argmax_overlaps(gt_boxes.size(), -1);
 
-  vector<vector<Dtype> > ious = get_ious(anchors, gt_boxes);
+  vector<vector<Dtype> > ious = get_ious(anchors, gt_boxes, this->use_gpu_nms_in_forward_cpu);
+  this->use_gpu_nms_in_forward_cpu = false; // restore
 
   for (int ia = 0; ia < n_anchors; ia++) {
     for (size_t igt = 0; igt < gt_boxes.size(); igt++) {
@@ -388,16 +406,16 @@ void FPNAnchorTargetLayer<Dtype>::Forward_cpu(
   CHECK_EQ(bbox_inside_weights.size(), bbox_outside_weights.size());
 
   for (size_t index = 0; index < inds_inside.size(); index++) {
-    const int fp_i = inds_inside[index] / max_anchors;
-    const int ind = inds_inside[index] % max_anchors;
-    const int _anchor = ind % config_n_anchors_;
-    const int width = fpn_width[fp_i];
+    const int fp_i = fpn_idx[index];
     const int fp_block = fpn_areas_accum[fp_i];
+    const int ind = inds_inside[index] - fp_block * config_n_anchors_;
+    const int _anchor = ind % config_n_anchors_;
+    const int width = bottom[fp_i]->width();
     const int _height = (ind / config_n_anchors_) / width;
     const int _width  = (ind / config_n_anchors_) % width;
     int oft = fp_block + _height * width + _width;
     //top_labels[ top[0]->offset(0,0,_anchor*height+_height,_width) ] = labels[index];
-    top_labels[ top[0]->offset(0,0,index,0) ] = labels[index];
+    top_labels[ top[0]->offset(0,0,inds_inside[index],0) ] = labels[index];
     for (int cor = 0; cor < 4; cor++) {
       //top_bbox_targets        [ top[1]->offset(0,_anchor*4+cor,_height,_width) ] = bbox_targets[index][cor];
       //top_bbox_inside_weights [ top[2]->offset(0,_anchor*4+cor,_height,_width) ] = bbox_inside_weights[index][cor];

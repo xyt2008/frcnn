@@ -1,12 +1,23 @@
-**Special Feature for This Caffe Repository**
+**Special Features for This Caffe Repository**
 
+- approximate joint train, test and evaluate models of Faster rcnn/R-FCN, .etc
+- support multi-GPU training
+- support [R-FCN](https://arxiv.org/abs/1605.06409) with OHEM
+- support [Light-head R-CNN](https://arxiv.org/abs/1711.07264) / [R-FCN++](https://www.aaai.org/ocs/index.php/AAAI/AAAI18/paper/viewPDFInterstitial/16463/16297)
+- support [Cascade R-CNN](https://arxiv.org/abs/1712.00726)
 - support FPN ([Feature Pyramid Network](https://arxiv.org/abs/1612.03144))
-- support SSD (not tested formally)
-- script for merging `Conv + BatchNorm + Scale` layers to 1 layer when those layer are freezed to reduce memory
+- support [Deformable Conv](https://arxiv.org/abs/1703.06211) and Deformable PSROIPooling
+- support SSD layers
+- support YOLOv3 inference
+- Action recognition (Two Stream CNN)
+- CTPN layers for scene text detection, port from [tianzhi0549/CTPN](https://github.com/tianzhi0549/CTPN)
+- script for merging `Conv + BatchNorm + Scale` layers to 1 layer when those layer are freezed to reduce memory: 'examples/FRCNN/res50/gen\_merged\_model.py'. script for merge ResNet: 'examples/FRCNN/merge\_resnet.sh'.
 - support snapshot after got -SIGTERM (kill command's default signal)
 - logger tools by VisualDL which can visualize loss scalars and feature images .etc
-- Faster rcnn joint train, test and evaluate
-- Action recognition (Two Stream CNN)
+- support NMS and IOU calc on GPU, [Soft-NMS](https://arxiv.org/abs/1704.04503) on CPU
+- support box-voting & multi-scale testing
+- support solver learning rate warm-up strategy & cosine decay lr & Cyclical lr (see sgd\_solver.cpp)
+- support model file encrypt/decrypt, see 'encrypt\_model.cpp' & 'frcnn\_api.cpp'
 
 **Special layers**
 
@@ -15,7 +26,8 @@
 - Swish Activation function in [Searching for Activation Functions](https://arxiv.org/abs/1710.05941)
 - Eltwise layer using in-place sum to reduce memory, from [this PR](https://github.com/BVLC/caffe/pull/3708)
 - caffe layer module, layer definition and usage like `Python layer`,from caffe [PR#5294](https://github.com/BVLC/caffe/pull/5294)
-- CuDNNDeconv layer, Depth-wise Conv layer
+- CuDNNDeconv layer, Depth-wise Conv layer, Upsample layer
+- CTPN layers include LSTM layer implemented by [@junhyukoh](https://github.com/junhyukoh/caffe-lstm),which is faster than upstream master branch of Caffe.
 
 **Data Preprocess**
 
@@ -33,20 +45,27 @@ data augmentation:
 
 - [ ] support batch image greater than 1 (on branch batch)
 - [x] support Rotated R-CNN for rotated bounding box (on branch r-frcnn)
-- [ ] OHEM
-- [ ] Retinex
+- [x] support OHEM (see r-fcn)
 
 ## Installation
 
 This repository uses C++11 features, so make sure to use compiler that is compatible of C++11.
+
+Tested on CUDA 8.0/9.2, CuDNN 7.0, NCCLv1[#286916a](https://github.com/NVIDIA/nccl/tree/286916a1a37ca1fe8cd43e280f5c42ec29569fc5).
+
+GCC v5.4.0/7.3.1, note that versions lower than v5 are not supported. 
+Python 2.7 for python scripts.
+
 ```shell
 cd $CAFFE_ROOT
 cp Makefile.config.example Makefile.config
 # modify the content in Makefile.config to adapt your system
 # if you like to use VisualDL to log losses, set USE_VISUALDL to 1,
 # and cd src/logger && make
-make -j
-make pyfrcnn # if you need use python to demo
+make -j7
+# extra: 'py' for python interface of Caffe.
+# extra: 'pyfrcnn' python wrapper of C++ api. You can use this for demo.
+make pyfrcnn py
 ```
 
 All following steps, you should do these in the `$CAFFE_ROOT` path.
@@ -56,8 +75,8 @@ All following steps, you should do these in the `$CAFFE_ROOT` path.
 ### Disclaimer
 The official [Faster R-CNN](https://arxiv.org/abs/1506.01497) code of NIPS 2015 paper (written in MATLAB) is [available](https://github.com/ShaoqingRen/faster_rcnn) here. It is worth noticing that:
 
-- This repository contains a C++ reimplementation of the Python code([py-faster-rcnn](https://github.com/rbgirshick/py-faster-rcnn)), which is built on [caffe1](https://github.com/BVLC/caffe).
-- This repository used code from [caffe-faster-rcnn](https://github.com/D-X-Y/caffe-faster-rcnn/tree/dev) `commit 8ba1d26`.
+- This repository contains a C++ reimplementation of the Python code([py-faster-rcnn](https://github.com/rbgirshick/py-faster-rcnn)), which is built on [caffe](https://github.com/BVLC/caffe).
+- This repository used code from [caffe-faster-rcnn](https://github.com/D-X-Y/caffe-faster-rcnn/tree/dev) `commit 8ba1d26` as base framework.
 
 ### Demo
 Using `sh example/FRCNN/demo_frcnn.sh`, the will process five pictures in the `examples/FRCNN/images`, and put results into `examples/FRCNN/results`.
@@ -99,17 +118,33 @@ because the regression value is normalized during training and we should recover
 - First Step of This Shell : Test all voc-2007-test images and output results in a text file.
 - Second Step of This Shell : Compare the results with the ground truth file and calculate the mAP.
 
+### Config
+
+The program use config file named like `config.json` to set params. Special params need to be cared about:
+
+- `data_jitter`: data augmentation, if set <0 then no jitter,hue,saturation,exposure
+- `im_size_align`: set to stride of last conv layer of FPN to avoid Deconv shape problem, such as 64, set to 0 to disable
+- `bbox_normalize_targets`: do bbox norm in training, and do unnorm at testing(do not need convert model weight before testing)
+- `test_rpn_score_thresh`: you can set >0 to speed up NMS at testing
+
 ### Detail
 
-Shells and prototxts for different models are listed in the `examples/FRCNN` and `models/FRCNN`
+Scripts and prototxts for different models are listed in the `examples/FRCNN`
 
 More details about the code in include and src directory:
+
 - `api/FRCNN` for demo and test api
 - `caffe/FRCNN` contains codes related to Faster R-CNN
+- `caffe/RFCN` for R-FCN
+- `caffe/DeformConv` for Deformable Conv
+- `caffe/SSD` for SSD
+- `examples/YOLO` for YOLOv3 inference, includes converter script and demo. pay attention to the Upsample layer usage.
 - `logger` dir relates to logger tools
 - `modules` and `yaml-cpp` relate to Caffe module layers, which include FPN layers .etc
 - `python/frcnn` relates to pybind11 interface for demo
 - `caffe/ACTION_REC` Two-Stream Convolutional Networks for Action Recognition in Video
+- `caffe/CTPN` relates to CTPN special layers for scene text detection
+- `caffe/PR` for some layers from caffe PR
 
 ### Commands, Rebase From Caffe Master
 
@@ -126,16 +161,18 @@ More details about the code in include and src directory:
 - git push -f origin dev
 
 ## QA
+
 - CUB not found, when compile for GPU version, `frcnn_proposal_layer.cu` requires a head file `<cub/cub.cuh>`. CUB is library contained in the official Cuda Toolkit, usually can be found in ` /usr/local/cuda/include/thrust/system/cuda/detail/`. You should add this path in your `Makefile.config` (try `locate cub.cuh` to find cub on your system)
 - When Get `error: RPC failed; result=22, HTTP code = 0`, use `git config http.postBuffer 524288000`, increases git buffer to 500mb
-
+- Cannot load module layer dynamic library, the program search the modules first in enviroment variable `CAFFE_LAYER_PATH` then in predefined `DEFAULT_LAYER_PATH` in Makefile. So try to set `CAFFE_LAYER_PATH` in shell script. And this could be happen when using pycaffe.
+- about R-FCN: currently not support class-agnostic (although it is easy to modify), and OHEM method has very little improvement in joint train. also remember to set `bg_thresh_lo` to 0 when use OHEM.
 
 ## License and Citation
 
 Caffe is released under the [BSD 2-Clause license](https://github.com/BVLC/caffe/blob/master/LICENSE).
 The BAIR/BVLC reference models are released for unrestricted use.
 
-Please cite Caffe in your publications if it helps your research:
+Please cite the following papers in your publications if it helps your research:
 
     @article{jia2014caffe,
       Author = {Jia, Yangqing and Shelhamer, Evan and Donahue, Jeff and Karayev, Sergey and Long, Jonathan and Girshick, Ross and Guadarrama, Sergio and Darrell, Trevor},
@@ -166,5 +203,35 @@ Please cite Caffe in your publications if it helps your research:
       pages={1137--1149},
       year={2017},
       publisher={IEEE}
+    }
+    @article{dai16rfcn,
+        Author = {Jifeng Dai, Yi Li, Kaiming He, Jian Sun},
+        Title = {{R-FCN}: Object Detection via Region-based Fully Convolutional Networks},
+        Journal = {arXiv preprint arXiv:1605.06409},
+        Year = {2016}
+    }
+    @article{dai17dcn,
+        Author = {Jifeng Dai, Haozhi Qi, Yuwen Xiong, Yi Li, Guodong Zhang, Han Hu, Yichen Wei},
+        Title = {Deformable Convolutional Networks},
+        Journal = {arXiv preprint arXiv:1703.06211},
+        Year = {2017}
+    }
+    @article{
+        Author = {Navaneeth Bodla and Bharat Singh and Rama Chellappa and Larry S. Davis},
+        Title = {Soft-NMS -- Improving Object Detection With One Line of Code},
+        Booktitle = {Proceedings of the IEEE International Conference on Computer Vision},
+        Year = {2017}
+    }
+    @article{li2017light,
+      title={Light-Head R-CNN: In Defense of Two-Stage Object Detector},
+      author={Li, Zeming and Peng, Chao and Yu, Gang and Zhang, Xiangyu and Deng, Yangdong and Sun, Jian},
+      journal={arXiv preprint arXiv:1711.07264},
+      year={2017}
+    }
+    @inproceedings{cai18cascadercnn,
+      author = {Zhaowei Cai and Nuno Vasconcelos},
+      Title = {Cascade R-CNN: Delving into High Quality Object Detection},
+      booktitle = {CVPR},
+      Year  = {2018}
     }
 

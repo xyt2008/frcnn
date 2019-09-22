@@ -346,12 +346,19 @@ template <typename Dtype>
 Dtype get_iou(const Point4f<Dtype> &A, const Point4f<Dtype> &B);
 
 template <typename Dtype>
-vector<vector<Dtype> > get_ious(const vector<Point4f<Dtype> > &A, const vector<Point4f<Dtype> > &B);
+Dtype get_iou(const BBox<Dtype> &A, const BBox<Dtype> &B);
+
+template <typename Dtype>
+vector<vector<Dtype> > get_ious(const vector<Point4f<Dtype> > &A, const vector<Point4f<Dtype> > &B, bool use_gpu);
 template <typename Dtype>
 vector<vector<Dtype> > skew_ious(const vector<Point5f<Dtype> > &A, const vector<Point5f<Dtype> > &B);
 
 template <typename Dtype>
 vector<Dtype> get_ious(const Point4f<Dtype> &A, const vector<Point4f<Dtype> > &B);
+
+template <typename Dtype>
+vector<BBox<Dtype> > bbox_vote(const vector<BBox<Dtype> > &dets_NMS, const vector<BBox<Dtype> > &dets_all, Dtype iou_thresh=0.5, Dtype add_val=1.5);
+
 template <typename Dtype>
 Point4f<Dtype> rotate_outer_box_coordinates(Point5f<Dtype> rbox);
 
@@ -369,6 +376,11 @@ float extract_float(string target_key,  str_map& default_map);
 int extract_int(string target_key, str_map& default_map);
 
 vector<float> extract_vector(string target_key, str_map& default_map);
+
+string extract_string(string target_key, string default_value, str_map& default_map);
+float extract_float(string target_key, float default_value,  str_map& default_map);
+int extract_int(string target_key, int default_value, str_map& default_map);
+vector<float> extract_vector(string target_key, vector<float> default_value, str_map& default_map);
 
 // file 
 vector<string> get_file_list (const string& path, const string& ext);
